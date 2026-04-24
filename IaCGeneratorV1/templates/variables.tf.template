@@ -1,0 +1,55 @@
+###########################################################
+# Azure Base SIEM Architecture Variables
+###########################################################
+variable "subscription_id" {
+  description = "Azure Subscription ID"
+  type        = string
+}
+
+variable "resource_group_name" {
+  description = "Name of the existing or new Resource Group"
+  type        = string
+}
+
+variable "location" {
+  description = "Azure region for deployment"
+  type        = string
+}
+
+variable "resource_name" {
+  description = "Prefix or name for resources"
+  type        = string
+}
+
+###########################################################
+# Optional AWS CloudTrail Module Variables
+###########################################################
+variable "aws_access_key" {
+  description = "AWS Access Key (required for CloudTrail)"
+  type        = string
+  default     = ""
+}
+
+variable "aws_secret_key" {
+  description = "AWS Secret Key (required for CloudTrail)"
+  type        = string
+  default     = ""
+}
+
+variable "s3_bucket" {
+  description = "S3 Bucket for CloudTrail logs"
+  type        = string
+  default     = ""
+}
+
+variable "aws_region" {
+  description = "AWS Region for CloudTrail"
+  type        = string
+  default     = ""
+}
+
+variable "sentinel_shared_key" {
+  description = "Shared key for Microsoft Sentinel ingestion"
+  type        = string
+  default     = ""
+}

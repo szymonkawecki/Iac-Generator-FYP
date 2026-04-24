@@ -1,0 +1,240 @@
+###########################################################
+# Azure client info
+###########################################################
+data "azurerm_client_config" "current" {}
+
+###########################################################
+# Key Vault
+###########################################################
+
+resource "azurerm_key_vault_secret" "aws_access_key" {
+  name         = "aws-access-key"
+  value        = var.aws_access_key
+  key_vault_id = azurerm_key_vault.kv.id
+}
+
+resource "azurerm_key_vault_secret" "aws_secret_key" {
+  name         = "aws-secret-key"
+  value        = var.aws_secret_key
+  key_vault_id = azurerm_key_vault.kv.id
+}
+
+
+###########################################################
+# Storage Account + Blob for Function App
+###########################################################
+resource "azurerm_storage_account" "function_storage" {
+  name                     = "st${var.resource_name}"
+  resource_group_name      = var.resource_group_name
+  location                 = var.location
+  account_tier             = "Standard"
+  account_replication_type = "LRS"
+}
+
+###########################################################
+# Linux Function App Service Plan
+###########################################################
+resource "azurerm_service_plan" "function_plan" {
+  name                = "func-${var.resource_name}-plan"
+  location            = var.location
+  resource_group_name = var.resource_group_name
+  os_type             = "Linux"
+  sku_name            = "Y1"
+}
+
+###########################################################
+# Application Insights
+###########################################################
+resource "azurerm_application_insights" "app_insights" {
+  name                = "appi-${var.resource_name}"
+  location            = var.location
+  resource_group_name = var.resource_group_name
+  application_type    = "web"
+}
+
+###########################################################
+# Sentinel Data Collection Consumer
+###########################################################
+
+resource "azurerm_eventhub_consumer_group" "sentinel_consumer_aws" {
+  name                = "sentinel-cg"
+  eventhub_name       = azurerm_eventhub.evh_eh_aws.name
+  namespace_name      = azurerm_eventhub_namespace.evh_ns.name
+  resource_group_name = var.resource_group_name
+}
+
+###########################################################
+# Linux Function App
+###########################################################
+resource "azurerm_linux_function_app" "aws_function" {
+  name                       = "func-${var.resource_name}-aws"
+  location                   = var.location
+  resource_group_name        = var.resource_group_name
+  service_plan_id            = azurerm_service_plan.function_plan.id
+
+  // Zip deploy
+  zip_deploy_file = "${path.module}/packages/function_app.zip"
+
+  identity {
+    type         = "SystemAssigned"
+    }
+
+  storage_account_name       = azurerm_storage_account.function_storage.name
+  storage_account_access_key = azurerm_storage_account.function_storage.primary_access_key
+
+  site_config {
+    application_stack {
+      python_version = "3.11"
+    }
+  }
+
+  app_settings = {
+    "FUNCTIONS_WORKER_RUNTIME" = "python"
+
+    "AWS_ACCESS_KEY" = "@Microsoft.KeyVault(VaultName=${azurerm_key_vault.kv.name};SecretName=${azurerm_key_vault_secret.aws_access_key.name})"
+    "AWS_SECRET_KEY" = "@Microsoft.KeyVault(VaultName=${azurerm_key_vault.kv.name};SecretName=${azurerm_key_vault_secret.aws_secret_key.name})"
+    "AWS_REGION"     = var.aws_region
+    "S3_BUCKET"      = var.s3_bucket
+
+    "STORAGE_ACCOUNT_NAME" = azurerm_storage_account.function_storage.name
+    "EVENT_HUB_NAMESPACE" = "${azurerm_eventhub_namespace.evh_ns.name}.servicebus.windows.net"
+    "EVENT_HUB_NAME" = "aws_cloudtrail"
+
+    "APPINSIGHTS_INSTRUMENTATIONKEY" = azurerm_application_insights.app_insights.instrumentation_key
+  }
+}
+
+###########################################################
+# Event Hub
+###########################################################
+resource "azurerm_eventhub" "evh_eh_aws" {
+  name              = "aws_cloudtrail"
+  namespace_id      = azurerm_eventhub_namespace.evh_ns.id
+  partition_count   = 2
+  message_retention = 1
+}
+
+
+###########################################################
+# ADX Table + Ingestion Mapping
+###########################################################
+
+resource "azurerm_kusto_script" "create_table_aws" {
+  name                = "create-aws-cloudtrail-table"
+  database_id         = azurerm_kusto_database.adx_db.id
+
+  script_content = <<KQL
+.create table AWSCloudTrail (
+    EventId: string,
+    EventName: string,
+    ReadOnly: bool,
+    EventTime: datetime,
+    EventSource: string,
+    Resources: dynamic,
+    CloudTrailEvent: dynamic
+)
+KQL
+}
+
+
+resource "azurerm_kusto_script" "create_mapping_aws" {
+  name        = "create-aws-cloudtrail-mapping"
+  database_id = azurerm_kusto_database.adx_db.id
+
+  script_content = <<KQL
+.create-or-alter table AWSCloudTrail ingestion json mapping "AWSCloudTrail_mapping" '[ { "column": "EventId", "path": "$.EventId" }, { "column": "EventName", "path": "$.EventName" }, { "column": "ReadOnly", "path": "$.ReadOnly" }, { "column": "EventTime", "path": "$.EventTime" }, { "column": "EventSource", "path": "$.EventSource" }, { "column": "Resources", "path": "$.Resources" }, { "column": "CloudTrailEvent", "path": "$.CloudTrailEvent" } ]'
+KQL
+
+  depends_on = [
+    azurerm_kusto_script.create_table_aws
+  ]
+}
+
+###########################################################
+# Event Hub Data Connection to ADX
+###########################################################
+
+resource "azurerm_kusto_eventhub_data_connection" "eventhub_connection_aws" {
+  name                = "aws-cloudtrail-dc"
+  resource_group_name = var.resource_group_name
+  location            = var.location
+  cluster_name        = azurerm_kusto_cluster.adx_cluster.name
+  database_name       = azurerm_kusto_database.adx_db.name
+  depends_on = [azurerm_kusto_script.create_table_aws]
+
+  eventhub_id    = azurerm_eventhub.evh_eh_aws.id
+  consumer_group = "$Default"
+
+  table_name           = "AWSCloudTrail"
+  mapping_rule_name    = "AWSCloudTrail_mapping"
+  data_format          = "JSON"
+}
+
+###########################################################
+# Load Balancing & Network Security Group Rules
+###########################################################
+
+resource "azurerm_network_security_rule" "allow_aws_ingress" {
+  name                        = "Allow-AWS-Ingress"
+  priority                    = 120
+  direction                   = "Inbound"
+  access                      = "Allow"
+  protocol                    = "Tcp"
+
+  source_port_range          = "*"
+  destination_port_range     = "443"
+
+  source_address_prefix      = "203.0.113.0/24"
+  destination_address_prefix = "10.0.1.0/24"
+
+  resource_group_name        = azurerm_resource_group.rg.name
+  network_security_group_name = azurerm_network_security_group.nsg.name
+}
+
+resource "azurerm_lb_rule" "aws_https_rule" {
+  name                           = "AWS-HTTPS-Rule"
+  loadbalancer_id               = azurerm_lb.internal_lb.id
+
+  protocol                      = "Tcp"
+  frontend_port                 = 443
+  backend_port                  = 443
+
+  frontend_ip_configuration_name = "frontend"
+
+  floating_ip_enabled            = false
+  idle_timeout_in_minutes       = 4
+}
+
+###########################################################
+# Role assignments
+###########################################################
+
+resource "azurerm_role_assignment" "kv_secrets_user_aws" {
+  scope                = azurerm_key_vault.kv.id
+  role_definition_name = "Key Vault Secrets User"
+  principal_id         = azurerm_linux_function_app.aws_function.identity[0].principal_id
+}
+
+resource "azurerm_role_assignment" "function_blob_data_aws" {
+  scope                = azurerm_storage_account.function_storage.id
+  role_definition_name = "Storage Blob Data Contributor"
+  principal_id         = azurerm_linux_function_app.aws_function.identity[0].principal_id
+}
+
+resource "azurerm_role_assignment" "function_queue_data_aws" {
+  scope                = azurerm_storage_account.function_storage.id
+  role_definition_name = "Storage Queue Data Contributor"
+  principal_id         = azurerm_linux_function_app.aws_function.identity[0].principal_id
+}
+
+resource "azurerm_role_assignment" "function_table_data_aws" {
+  scope                = azurerm_storage_account.function_storage.id
+  role_definition_name = "Storage Table Data Contributor"
+  principal_id         = azurerm_linux_function_app.aws_function.identity[0].principal_id
+}
+
+resource "azurerm_role_assignment" "eventhub_namespace_aws" {
+  scope                = azurerm_eventhub_namespace.evh_ns.id
+  role_definition_name = "Azure Event Hubs Data Sender"
+  principal_id         = azurerm_linux_function_app.aws_function.identity[0].principal_id
+}
