@@ -1,0 +1,13 @@
+# azure monitor
+# azure-monitor-opentelemetry
+
+boto3==1.42.91
+python-dateutil==2.9.0.post0
+requests==2.32.3
+azure-functions==1.21.3
+azure-data-tables==12.7.0
+azure-identity==1.19.0
+azure-core==1.31.0
+azure-kusto-data==4.6.1
+azure-kusto-ingest==4.6.1
+azure-eventhub==5.12.0
