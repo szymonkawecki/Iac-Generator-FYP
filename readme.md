@@ -107,7 +107,7 @@ sudo apt install -y terraform
 ### 1. Clone the Repository
 
 ```
-git clone https://github.com/your-repo/IaCGeneratorV1.git
+git clone https://github.com/szymonkawecki/Iac-Generator-FYP.git
 ```
 
 ### 2. Navigate into the Project Directory
